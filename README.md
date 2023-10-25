@@ -15,7 +15,7 @@ The scShift (pertvi) package is supported for all OS in principle. The package h
 See `setup.cfg` for details.
 
 ## Installation
-PertVI requires `python` version 3.7+.  Install directly from pip with:
+scShift (PertVI) requires `python` version 3.7+.  Install directly from pip with:
 
     pip install pertvi
 
