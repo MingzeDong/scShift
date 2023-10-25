@@ -26,8 +26,8 @@ The installation should take no more than a few minutes on a normal desktop comp
 
 For detailed usage, follow our step-by-step tutorial here:
 
-- [Getting Started with SIMVI](https://github.com/MingzeDong/SIMVI/blob/main/SIMVItutorial.ipynb)
+- [Getting Started with scShift](https://github.com/MingzeDong/scShift/blob/main/scShift_tutorial.ipynb)
 
 Download the model and data used for the tutorial here:
 
-- [Human MERFISH MTG data](https://drive.google.com/file/d/1i6spfxfEqqczgSHDX0gNImrGkH7Ruy7z/view?usp=sharing)
+- [Model and datasets used in the tutorial](https://drive.google.com/drive/folders/1sx-c1i_Xp1J__XBD1nmCWc39WsbMwys5?usp=share_link)
