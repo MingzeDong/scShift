@@ -1,4 +1,4 @@
-"""PyTorch module for PertVI for modeling cellular interaction variation."""
+"""PyTorch module for PertVI for modeling cellular variation."""
 
 from typing import Dict, Optional, Tuple
 
