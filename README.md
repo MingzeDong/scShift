@@ -2,9 +2,9 @@
 
 scShift is a framework that learns batch and biological patterns from atlas-level scRNA-seq data as well as perturbation scRNA-seq data. scShift models genes as functions of latent biological processes, with sparse shifts induced by batch effects and biological perturbations, leveraging recent advances of causal representation learning. scShift is able to reveal unified cell type representations and underlying biological variations for query data in zero-shot manners. scShift is implemented by scvi-tools. scShift not only performs variational inference for large scRNA-seq datasets, but covers the data curation, model interpretation, and zero-shot query. Therefore, we refer its model architecture (and the package name) as a different name (PertVI).
 
-![fig1github](https://github.com/MingzeDong/scShift/assets/68533876/34ada998-a766-4d30-a41e-dd8e906690b7)<?xml version="1.0" encoding="utf-8"?>
+![fig1github](https://github.com/MingzeDong/scShift/assets/68533876/06c7c7bd-1bf0-4736-b113-32dd2cd202e9)
 
-Read our preprint on BioRxiv:
+Read our preprint on BioRxiv: [Deep identifiable modeling of single-cell atlases enables zero-shot query of cellular states](https://www.biorxiv.org/content/10.1101/2023.11.11.566161v1)
 
 ## System requirements
 ### OS requirements
