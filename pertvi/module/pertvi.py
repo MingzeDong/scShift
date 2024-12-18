@@ -1,4 +1,4 @@
-"""PyTorch module for PertVI for modeling cellular variation."""
+"""PyTorch module for scShift (PertVI) that disentangles batch-dependent and batch-independent variations in data."""
 
 from typing import Dict, Optional, Tuple
 
@@ -13,7 +13,7 @@ from scvi.module.base import BaseModuleClass, LossRecorder, auto_move_data
 from scvi.nn import DecoderSCVI, Encoder, one_hot
 from torch.distributions import Normal
 from torch.distributions import kl_divergence as kl
-
+from torch.autograd import Variable
 
 import torch.optim as optim
 
@@ -49,15 +49,14 @@ class PertVIModule(BaseModuleClass):
         self.n_layers = n_layers
         self.dropout_rate = dropout_rate
         self.latent_distribution = "normal"
-        self.dispersion = "gene"
+        self.dispersion = "gene-batch"
         self.px_r = torch.nn.Parameter(torch.randn(n_input))
         self.use_observed_lib_size = use_observed_lib_size
         self.var_eps = var_eps
         self.lam_l0 = lam_l0
         self.lam_l1 = lam_l1
         self.lam_corr = lam_corr
-        self.kl_weight = kl_weight
-        #self.weight_ = nn.Parameter(torch.ones(n_output)*0.5,requires_grad=True)
+        self.kl_weight_ = kl_weight
 
         if not self.use_observed_lib_size:
             if library_log_means is None or library_log_vars is None:
@@ -138,10 +137,9 @@ class PertVIModule(BaseModuleClass):
         x = tensors[REGISTRY_KEYS.X_KEY]
         x_mask = x.clone()
         mask = torch.rand(x.shape[1]) < 0.25
-        #mt = torch.ones(x.shape[0],mask.sum(),dtype=torch.long)
-        #for i in range(mask.sum()):
-        #    mt[:,i] = torch.randperm(x.shape[0])
+
         x_mask[:,mask] = x[torch.argsort(torch.rand(x.shape[0],mask.sum()),axis=0),mask].clone()
+        #x_mask[:,mask] = x_mask[:,mask] * 0
         
         #x_mask[x<0] = x[x<0].clone()
         #x_mask[:,mask] = x_mask[torch.randperm(x_mask.shape[0])[:,None],mask]
@@ -186,7 +184,7 @@ class PertVIModule(BaseModuleClass):
             library = obs_libsize
         x_ = torch.log(1 + x_)
 
-        q_m, q_v, z = self.base_encoder(x_, batch_index)
+        q_m, q_v, z = self.base_encoder(x_,batch_index)
         
         pert_ = torch.log(1 + pert)
         
@@ -201,20 +199,6 @@ class PertVIModule(BaseModuleClass):
             ql_m, ql_v, library_encoded = self.l_encoder(x_, batch_index)
             library = library_encoded
 
-        if n_samples > 1:
-            q_m = self._reshape_tensor_for_samples(q_m, n_samples)
-            q_v = self._reshape_tensor_for_samples(q_v, n_samples)
-            z = self._reshape_tensor_for_samples(z, n_samples)
-            z_pert = self._reshape_tensor_for_samples(z_pert, n_samples)
-            z_pert = (torch.clamp(torch.sign(p_m) * z_pert, min=0.1)-0.1) * torch.sign(p_m)
-            z_all = z + z_pert
-
-            if self.use_observed_lib_size:
-                library = self._reshape_tensor_for_samples(library, n_samples)
-            else:
-                ql_m = self._reshape_tensor_for_samples(ql_m, n_samples)
-                ql_v = self._reshape_tensor_for_samples(ql_v, n_samples)
-                library = Normal(ql_m, ql_v.sqrt()).sample()
 
         outputs = dict(
             z_all=z_all,
@@ -222,6 +206,7 @@ class PertVIModule(BaseModuleClass):
             q_m=q_m,
             q_v=q_v,
             z_pert=z_pert,
+            pert=pert,
             p_m=p_m,
             p_v=p_v,
             library=library,
@@ -361,14 +346,14 @@ class PertVIModule(BaseModuleClass):
 
     @staticmethod
     def l0_loss(
-        q_m: torch.Tensor,
-        q_v: torch.Tensor,
+        p_m: torch.Tensor,
+        p_v: torch.Tensor,
     ) -> torch.Tensor:
-        l = (1 + torch.erf(((torch.abs(q_m)-0.1) / q_v) / math.sqrt(2))) / 2
+        l = (1 + torch.erf(((torch.abs(p_m)-0.1) / p_v) / math.sqrt(2))) / 2
         #l = (1 + torch.erf((torch.abs(q_m) / q_v) / math.sqrt(2))) / 2
         values, indices = torch.kthvalue(-l,1,dim=-1)
         #l_ = (1 + torch.erf(((torch.abs(q_m)-0.1).sum(dim=0) / q_v.sum(dim=0)) * 5)) / 2
-        return l.sum(dim=-1) + values
+        return l.sum(dim=-1) + 2 * values
     
     @staticmethod
     def l0_loss_(
@@ -392,6 +377,8 @@ class PertVIModule(BaseModuleClass):
         q_v = inference_outputs["q_v"]
         p_m = inference_outputs["p_m"]
         p_v = inference_outputs["p_v"]
+        pert = inference_outputs["pert"]
+        z = inference_outputs["z"]
         library = inference_outputs["library"]
         ql_m = inference_outputs["ql_m"]
         ql_v = inference_outputs["ql_v"]
@@ -400,15 +387,14 @@ class PertVIModule(BaseModuleClass):
         px_dropout = generative_outputs["px_dropout"]
 
         prior_z_m = torch.zeros_like(q_m)
-        prior_z_v = torch.ones_like(q_v) * 0.25
-        prior_zall_m = p_m.detach()
-        prior_zall_v = torch.ones_like(q_v) * 0.25 + p_v.detach()
+        prior_z_v = 0.25 * torch.ones_like(q_v)
         recon_loss = self.reconstruction_loss(x, px_rate, px_r, px_dropout)
         l0_loss = self.l0_loss(p_m,p_v)
-        #corr_loss = self.corr_loss(q_m,p_m)
         p_ = p_m.detach()
         p_ = (torch.clamp(torch.sign(p_) * p_, min=0.1)-0.1) * torch.sign(p_)
-        corr_loss = self.latent_kl_divergence(q_m + p_, q_v + p_v.detach(), prior_zall_m, prior_zall_v)
+
+        
+        corr_loss = self.corr_loss(z,p_)
         kl_z = self.latent_kl_divergence(q_m, q_v, prior_z_m, prior_z_v)
         kl_library = self.library_kl_divergence(batch_index, ql_m, ql_v, library)
         return dict(
@@ -424,6 +410,7 @@ class PertVIModule(BaseModuleClass):
         tensors: Dict[str, torch.Tensor],
         inference_outputs: Dict[str, torch.Tensor],
         generative_outputs: Dict[str, torch.Tensor],
+        kl_weight: float = 1.0,
         **loss_kwargs,
     ) -> LossRecorder:
 
@@ -439,9 +426,9 @@ class PertVIModule(BaseModuleClass):
         kl_divergence_l = losses["kl_library"]
 
 
-        weighted_kl_local = self.lam_l0 * l0_loss + kl_divergence_l + kl_divergence
+        weighted_kl_local = self.lam_l0 * l0_loss + kl_divergence_l + self.kl_weight_ * kl_divergence + self.lam_corr * corr_loss
 
-        loss = torch.mean(reconst_loss + weighted_kl_local + self.lam_corr * corr_loss)
+        loss = torch.mean(reconst_loss + kl_weight * weighted_kl_local)
         
         decoder_params = torch.cat([x.view(-1) for x in self.decoder.parameters()])
         
@@ -449,9 +436,9 @@ class PertVIModule(BaseModuleClass):
 
         kl_local = dict(
             kl_divergence = kl_divergence,
-            kl_divergence_l=kl_divergence_l
+            kl_divergence_l = kl_divergence_l
         )
-        kl_global = torch.tensor(0.0)
+        kl_global = corr_loss
 
         # LossRecorder internally sums the `reconst_loss`, `kl_local`, and `kl_global`
         # terms before logging, so we do the same for our `wasserstein_loss` term.
@@ -461,62 +448,38 @@ class PertVIModule(BaseModuleClass):
             kl_local,
             kl_global,
         )
-          
+
     def corr_loss(
         self,
-        q_m: torch.Tensor,
-        p_m: torch.Tensor,
+        z: torch.Tensor,
+        p_: torch.Tensor,
     ):
-        """
-        Compute (discriminator) loss terms for SIMVI. 
+        true_samples1 = Variable(p_ + 0.5 * torch.randn(z.shape[0], z.shape[1],device=z.device),requires_grad=False)
+        true_samples2 = Variable(0.5 * torch.randn(z.shape[0], z.shape[1],device=z.device),requires_grad=False)
+        l1 = self.compute_mmd(z+p_,true_samples1)
+        l2 = self.compute_mmd(z,true_samples2)
 
-        Args:
-        ----
-            concat_tensors: Tuple of data mini-batch. The first element contains
-                background data mini-batch. The second element contains target data
-                mini-batch.
-            inference_outputs: Dictionary of inference step outputs. The keys
-                are "background" and "target" for the corresponding outputs.
-            generative_outputs: Dictionary of generative step outputs. The keys
-                are "background" and "target" for the corresponding outputs.
-            kl_weight: Importance weight for KL divergence of background and salient
-                latent variables, relative to KL divergence of library size.
-
-        Returns
-        -------
-            An scvi.module.base.LossRecorder instance that records the following:
-            loss: One-dimensional tensor for overall loss used for optimization.
-            reconstruction_loss: Reconstruction loss with shape
-                `(n_samples, batch_size)` if number of latent samples > 1, or
-                `(batch_size, )` if number of latent samples == 1.
-            kl_local: KL divergence term with shape
-                `(n_samples, batch_size)` if number of latent samples > 1, or
-                `(batch_size, )` if number of latent samples == 1.
-            kl_global: One-dimensional tensor for global KL divergence term.
-        """
-        psi_x = p_m.detach()
-        psi_y = q_m
-        
-        psi_x = (torch.clamp(torch.sign(psi_x) * psi_x, min=0.1)-0.1) * torch.sign(psi_x)
-        
-        psi_x = psi_x - psi_x.mean(axis=0)
-        psi_y = psi_y - psi_y.mean(axis=0)
-        
-        C_yy = self._cov(psi_y, psi_y)
-        C_yx = self._cov(psi_y, psi_x)
-        C_xy = self._cov(psi_x, psi_y)
-        C_xx = self._cov(psi_x, psi_x)
-
-        C_xx_inv = torch.inverse(C_xx+torch.eye(C_xx.shape[0], device=psi_x.device)*1e-3)
-
-        l2 = -torch.logdet(C_yy-torch.linalg.multi_dot([C_yx,C_xx_inv,C_xy])) + torch.logdet(C_yy)
-        return l2
+        return l1 + l2
     
+    
+    def compute_mmd(self, x, y):
+        x_kernel = self.compute_kernel(x, x)
+        y_kernel = self.compute_kernel(y, y)
+        xy_kernel = self.compute_kernel(x, y)
+        mmd = x_kernel.mean() + y_kernel.mean() - 2*xy_kernel.mean()
+        return mmd
     
     @staticmethod
-    def _cov(psi_x, psi_y):
-        """
-        :return: covariance matrix
-        """
-        N = psi_x.shape[0]
-        return (psi_y.T @ psi_x).T / (N - 1)
+    def compute_kernel(x, y):
+        x_size = x.size(0)
+        y_size = y.size(0)
+        dim = x.size(1)
+        x = x.unsqueeze(1) # (x_size, 1, dim)
+        y = y.unsqueeze(0) # (1, y_size, dim)
+        tiled_x = x.expand(x_size, y_size, dim)
+        tiled_y = y.expand(x_size, y_size, dim)
+        kernel_input = (tiled_x - tiled_y).pow(2).mean(2)/float(dim)
+        return torch.exp(-kernel_input) # (x_size, y_size)
+
+    
+    
