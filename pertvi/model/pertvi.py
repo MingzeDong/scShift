@@ -1,4 +1,4 @@
-"""Model class for pertVI for single cell expression data."""
+"""Model class for scShift (pertVI) that disentangles batch-dependent and batch-independent variations in data."""
 
 import logging
 import warnings
@@ -21,6 +21,9 @@ import matplotlib.pyplot as plt
 from scipy.sparse import issparse
 from torch.distributions import Normal
 from torch.autograd import Variable as V
+from scipy.stats import ttest_ind_from_stats
+from statsmodels.stats.multitest import fdrcorrection
+from random import choices
 
 from anndata import AnnData
 from scvi import REGISTRY_KEYS
@@ -45,7 +48,7 @@ from scvi.model._utils import (
 from scvi.model.base import BaseModelClass, ArchesMixin
 from scvi.model.base._utils import _de_core
 from scvi.utils import setup_anndata_dsp
-from scvi.train import SemiSupervisedTrainingPlan, TrainRunner
+from scvi.train import SemiSupervisedTrainingPlan, TrainingPlan, TrainRunner
 from scvi.dataloaders import DataSplitter, SemiSupervisedDataSplitter
 from scvi.model._utils import parse_use_gpu_arg
 from scvi.dataloaders._data_splitting import validate_data_split
@@ -133,7 +136,7 @@ class PertVIModel(BaseModelClass, ArchesMixin):
         **kwargs,
     ):
         """
-        Set up AnnData instance for MetaVI model.
+        Set up AnnData instance for scShift model.
 
         Args:
         ----
@@ -246,73 +249,9 @@ class PertVIModel(BaseModelClass, ArchesMixin):
             
         return torch.cat(latent).numpy()
 
-    @torch.no_grad()
-    def get_response(
-        self,
-        adata: Optional[AnnData] = None,
-        pert_key: str = 'pert',
-        indices: Optional[Sequence[int]] = None,
-        give_mean: bool = True,
-        use_mask = False,
-        batch_size: Optional[int] = None,
-        representation_kind: str = "all",
-    ) -> np.ndarray:
-        """
-        After training, return predicted response at gene level. 
-        """
-        adata_ = adata.copy()
-        adata_.obsm['pert'] = adata.obsm[pert_key].copy()
-        adata_ = self._validate_anndata(adata_)
-        dataloader = self._make_data_loader(adata=adata_, indices=indices,batch_size=batch_size,shuffle=False,data_loader_class=AnnDataLoader)
-        expression = []
-        for tensors in dataloader:
-            if use_mask:
-                inference_inputs = self.module._get_inference_input(tensors)
-            else:
-                inference_inputs = self.module._get_inference_input_eval(tensors)
-            outputs = self.module.inference(**inference_inputs)
-            g_inputs = self.module._get_generative_input(tensors, outputs)
-            g_outputs = self.module.generative(**g_inputs)
 
-            expression += [g_outputs["px_rate"].detach().cpu()]
-            
-        return torch.cat(expression).numpy()
     
-    
-    @torch.no_grad()
-    def get_shift(
-        self,
-        adata: Optional[AnnData] = None,
-        pert_key: str = 'pert',
-        indices: Optional[Sequence[int]] = None,
-        give_mean: bool = True,
-        use_mask = False,
-        batch_size: Optional[int] = None,
-        representation_kind: str = "all",
-    ) -> np.ndarray:
-        """
-        A multi-step function that returns a perturbation list for explaining the difference between diseased states and normal states. First use CINEMA-OT to get the counterfactual pairs. Then use the trained model, together with scArches fine tuning to identify the perturbation factor.
-        """
-        adata_ = adata.copy()
-        adata_.obsm['pert'] = adata.obsm[pert_key].copy()
-        adata_ = self._validate_anndata(adata_)
-        dataloader = self._make_data_loader(adata=adata_, indices=indices,batch_size=batch_size,shuffle=False,data_loader_class=AnnDataLoader)
-        expression = []
-        for tensors in dataloader:
-            if use_mask:
-                inference_inputs = self.module._get_inference_input(tensors)
-            else:
-                inference_inputs = self.module._get_inference_input_eval(tensors)
-            outputs = self.module.inference(**inference_inputs)
-            g_inputs = self.module._get_generative_input(tensors, outputs)
-            g_outputs = self.module.generative(**g_inputs)
-
-            expression += [g_outputs["px_scale"].detach().cpu()]
-            
-        return torch.cat(expression).numpy()    
-    
-    
-    
+        
     def get_pert(
         adata,
         pert_label = None,
@@ -351,11 +290,12 @@ class PertVIModel(BaseModelClass, ArchesMixin):
         n_samples_per_label = 100,
         lr = 1e-3,
         weight_decay = 1e-4,
+        n_epochs_kl_warmup = None,
+        n_steps_kl_warmup = 1600,
         **trainer_kwargs,
     ) -> None:
         """
-        Train the MetaVI model. In our setting, we consider full-batch training, therefore
-        we rewrite the training function. 
+        Train the scShift model using a semisupervised data splitter. 
 
         Args:
         ----
@@ -389,7 +329,16 @@ class PertVIModel(BaseModelClass, ArchesMixin):
             batch_size=batch_size,
             use_gpu=use_gpu,
         )
-        training_plan = SemiSupervisedTrainingPlan(self.module, lr = lr, weight_decay = weight_decay)
+        #data_splitter = DataSplitter(
+        #    self.adata_manager,
+        #    train_size=train_size,
+        #    validation_size=validation_size,
+        #    batch_size=batch_size,
+        #    use_gpu=use_gpu,
+        #)
+        
+        #training_plan = TrainingPlan(self.module, lr = lr, weight_decay = weight_decay,n_steps_kl_warmup = n_steps_kl_warmup, n_epochs_kl_warmup = n_epochs_kl_warmup)
+        training_plan = SemiSupervisedTrainingPlan(self.module, lr = lr, weight_decay = weight_decay,n_steps_kl_warmup = n_steps_kl_warmup, n_epochs_kl_warmup = n_epochs_kl_warmup)
 
         es = "early_stopping"
         trainer_kwargs[es] = (
@@ -404,147 +353,10 @@ class PertVIModel(BaseModelClass, ArchesMixin):
             **trainer_kwargs,
         )
         return runner()
-
-    def query_base(
-        self,
-        adata_query,
-        model,
-        indices: Optional[Sequence[int]] = None,
-        batch_size: int = 128,
-        use_mask = False,
-    ) -> None:
-        adata_prepared = adata_query.copy()
-        adata_prepared.obs_names_make_unique()
-        adata_prepared.var_names_make_unique()
-        self.prepare_query_anndata(adata_prepared,model)
-        
-        adata_prepared.obsm['pert'] = np.zeros((adata_prepared.shape[0],self.module.n_pert))
-        
-        return self.get_latent_representation(adata_prepared,representation_kind='base')
     
     
     
-    def query_pert(
-        self,
-        adata_query,
-        model,
-        max_epochs: Optional[int] = 50,
-        use_gpu: Optional[Union[str, int, bool]] = None,
-        indices: Optional[Sequence[int]] = None,
-        batch_size: int = 128,
-        use_mask = False,
-        early_stopping: bool = False,
-        train_size: float = 0.9,
-        validation_size: Optional[float] = None,
-        n_samples_per_label = 100,
-        lr = 1e-3,
-        weight_decay = 1e-4,
-        **trainer_kwargs,
-    ) -> None:
-        ### Here we learn the optimal z_pert in an zero-shot setting.
-        ### Then the original latent space is regressed to achieve independence with z_pert.
-        ### Here the setting is different from scArches and sVAE.
-        
-        
-        
-        adata_prepared = adata_query.copy()
-        adata_prepared.obs_names_make_unique()
-        adata_prepared.var_names_make_unique()
-        self.prepare_query_anndata(adata_prepared,model)
-        
-        adata_prepared.obsm['pert'] = np.zeros((adata_prepared.shape[0],self.module.n_pert))
-        
-        adata_prepared = self._validate_anndata(adata_prepared)
-        gpus, device = parse_use_gpu_arg(use_gpu, return_device=True)
-        pin_memory = (
-            True if (settings.dl_pin_memory_gpu_training and gpus != 0) else False
-        )
-        
-        tensors = AnnTorchDataset(self.get_anndata_manager(adata_prepared, required=True))
-        #dataloader = self._make_data_loader(adata=adata_prepared, indices=indices,batch_size=adata_prepared.shape[0],shuffle=False,pin_memory=pin_memory,data_loader_class=AnnDataLoader)
-        #for tensors in dataloader:
-        #    for ind in tensors:
-        #        tensors[ind] = tensors[ind].to(model.device)
-        
-        sampler_kwargs = {
-            "indices": np.arange(adata_prepared.shape[0]),
-            "batch_size": batch_size,
-            "shuffle": True,
-            "drop_last": False,
-        }
-        
-        sampler = BatchSampler(**sampler_kwargs)
-        ## initialization
-        
-        p_m_ = torch.rand(adata_prepared.shape[0],self.module.n_output,requires_grad=True, device=model.device)
-        p_v_ = torch.rand(adata_prepared.shape[0],self.module.n_output,requires_grad=True, device=model.device)
-        #p_m = p_m_ - 0.5
-        
-        self.module.freeze_params()
-        
-        optimizer = optim.Adam([p_m_,p_v_], lr=lr, weight_decay=weight_decay)
-        
-        pbar = tqdm(range(1, max_epochs + 1))
-        
-        train_loss = []
-        
-        for epoch in pbar:
-            train_loss.append(train_query(self.module, tensors, sampler, p_m_, p_v_, optimizer, use_mask).detach())
-            pbar.set_description('Epoch '+str(epoch)+'/'+str(max_epochs))
-            pbar.set_postfix(train_loss=train_loss[epoch-1].cpu().numpy())
-            #print('Epoch ',epoch)
-            
-                
-        model.module.eval()
-        ## Now return trained p_m as the pert_embedding for the model
-        p_m = torch.sign(p_m_-0.5) * (torch.clamp(torch.abs(p_m_-0.5),min=0.1)-0.1)
-        p_m = p_m.detach().cpu().numpy()
-        #init_p_m = p_m - p_m.mean(axis=0)
-        #init_p_m = init_p_m / init_p_m.std(axis=0)
-
-        base_rep = self.get_latent_representation(adata_prepared,representation_kind='base')
-        #pert_embedding = self.get_latent_representation(self.adata_manager.adata,representation_kind='pert')
-        #id_ind = np.abs(pert_embedding).sum(axis=0).copy()
-        #base_rep[:,id_ind>0] = base_rep[:,id_ind>0] - base_rep[:,id_ind>0].mean(axis=0)
-        #base_rep[:,id_ind>0] = base_rep[:,id_ind>0] / base_rep[:,id_ind>0].std(axis=0)
-        #base_rep[:,id_ind>0] = base_rep[:,id_ind>0] - init_p_m[:,id_ind>0] * (init_p_m[:,id_ind>0] * base_rep[:,id_ind>0]).sum(axis=0) / init_p_m.shape[0]
-        
-        #base_rep[:,id_ind==0] = base_rep[:,id_ind==0] + p_m[:,id_ind==0]
-        #p_m[:,id_ind==0] = 0
-        
-        return base_rep + p_m
     
-    
-def train_query(model, tensors, sampler, p_m_, p_v_, optimizer, use_mask):
-    model.train()
-    for idx in sampler:
-        tensor_tmp = tensors[idx]
-        for ind in tensor_tmp:
-            tensor_tmp[ind] = torch.Tensor(tensor_tmp[ind]).to(model.device)
-        
-        optimizer.zero_grad()
-        if use_mask:
-            inference_inputs = model._get_inference_input(tensor_tmp)
-        else:
-            inference_inputs = model._get_inference_input_eval(tensor_tmp)
-        outputs = model.inference(**inference_inputs)
-        p_m = torch.sign(p_m_-0.5) * (torch.clamp(torch.abs(p_m_-0.5),min=0.1)-0.1)
-        p_v = p_v_ + 0.01
-        outputs['p_m'] = p_m[idx]
-        outputs['p_v'] = p_v[idx]
-        dist = Normal(p_m[idx], p_v[idx].sqrt())
-        z_pert = dist.rsample()
-        outputs['z_pert'] = z_pert
-        outputs['z_all'] = z_pert + outputs['z']
-    
-        g_inputs = model._get_generative_input(tensor_tmp, outputs)
-        g_outputs = model.generative(**g_inputs)
-        lossrecorder = model.loss(tensor_tmp, outputs, g_outputs)
-        loss = lossrecorder.loss
-    
-        loss.backward(retain_graph=True)
-        optimizer.step()
-    return loss
 
         
         
