@@ -14,4 +14,5 @@ The scShift (pertvi) package is supported for all OS in principle. The package h
 ### Dependencies
 See `setup.cfg` for details.
 
-Installation instruction, our trained models, and a tutorial will be online soon.
+## Usage
+Please refer to the documentation and tutorial [here](https://idsc-suite.readthedocs.io/en/latest). Download the data / model used for tutorial [here](https://drive.google.com/drive/folders/1YXfoPAav-IGRbXjBfUT-ak8u3R5VUVCe?usp=share_link).
