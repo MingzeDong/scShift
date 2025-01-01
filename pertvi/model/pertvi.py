@@ -1,4 +1,4 @@
-"""Model class for scShift (pertVI) that disentangles batch-dependent and batch-independent variations in data."""
+"""Model class for scShift that disentangles batch-dependent and batch-independent variations in data."""
 
 import logging
 import warnings
@@ -10,8 +10,7 @@ import pandas as pd
 import math
 import torch
 import scanpy as sc
-from sklearn.neighbors import kneighbors_graph
-from scipy.spatial import Delaunay
+
 import pytorch_lightning as pl
 import torch.optim as optim
 from scvi import settings
@@ -21,8 +20,7 @@ import matplotlib.pyplot as plt
 from scipy.sparse import issparse
 from torch.distributions import Normal
 from torch.autograd import Variable as V
-from scipy.stats import ttest_ind_from_stats
-from statsmodels.stats.multitest import fdrcorrection
+
 from random import choices
 
 from anndata import AnnData
@@ -62,9 +60,45 @@ Number = Union[int, float]
 
 class PertVIModel(BaseModelClass, ArchesMixin):
     """
-    Model class for pertVI.
-    """
+        Model class for scShift.
 
+        This model aims to disentangle batch-dependent and batch-independent variations
+        in single-cell data using variational inference.
+
+        Parameters
+        ----------
+        adata : AnnData
+                AnnData object containing single-cell data. Must have been set up
+                via `scShift.setup_anndata` or an equivalent.
+        n_batch : int, default: 0
+                Number of batches in the dataset.
+        n_hidden : int, default: 128
+                Number of nodes per hidden layer.
+        n_latent : int, default: 10
+                Dimensionality of the latent space.
+        n_layers : int, default: 2
+                Number of hidden layers in encoder/decoder neural networks.
+        dropout_rate : float, default: 0
+                Dropout rate to apply to layers.
+        use_observed_lib_size : bool, default: True
+                If True, use observed library size as scaling factor in the mean of the distribution.
+        lam_l0 : float, default: 50
+                Regularization coefficient (L0) for dataset label encoding through the stochastic gate mechanism.
+        lam_l1 : float, default: 0.0
+                L1 penalty coefficient.
+        lam_corr : float, default: 5
+                Independence regularization between centralized embedding and dataset label encoding.
+        var_eps : float, default: 1e-4
+                Minimal variance for the variational posteriors.
+        kl_weight : float, default: 1
+                KL divergence scale factor.
+
+        Returns
+        -------
+        None
+                The model is initialized in place.
+
+    """
     def __init__(
         self,
         adata: AnnData,
@@ -75,7 +109,7 @@ class PertVIModel(BaseModelClass, ArchesMixin):
         dropout_rate: float = 0,
         use_observed_lib_size: bool = True,
         lam_l0: float = 50,
-        lam_l1: float = 1e-2,
+        lam_l1: float = 0,
         lam_corr: float = 5,
         var_eps: float = 1e-4,
         kl_weight: float = 1,
@@ -136,34 +170,37 @@ class PertVIModel(BaseModelClass, ArchesMixin):
         **kwargs,
     ):
         """
-        Set up AnnData instance for scShift model.
+            Set up AnnData instance for scShift model. Need to run get_pert first.
 
-        Args:
-        ----
-            adata: AnnData object containing raw counts. Rows represent cells, columns
-                represent features.
-            layer: If not None, uses this as the key in adata.layers for raw count data.
-            batch_key: Key in `adata.obs` for batch information. Categories will
-                automatically be converted into integer categories and saved to
-                `adata.obs["_scvi_batch"]`. If None, assign the same batch to all the
-                data.
-            labels_key: Key in `adata.obs` for label information. Categories will
-                automatically be converted into integer categories and saved to
-                `adata.obs["_scvi_labels"]`. If None, assign the same label to all the
-                data.
-            size_factor_key: Key in `adata.obs` for size factor information. Instead of
-                using library size as a size factor, the provided size factor column
-                will be used as offset in the mean of the likelihood. Assumed to be on
-                linear scale.
-            categorical_covariate_keys: Keys in `adata.obs` corresponding to categorical
-                data. Used in some models.
-            continuous_covariate_keys: Keys in `adata.obs` corresponding to continuous
-                data. Used in some models.
+            Parameters
+            ----------
+            adata : AnnData
+                    AnnData object containing raw counts. Rows represent cells, columns
+                    represent features.
+            pert_key : str, default: 'pert'
+                    Key in `adata.obsm` for perturbation encoding.
+            layer : str, optional
+                    If not None, uses this as the key in adata.layers for raw count data.
+            batch_key : str, optional
+                    Key in `adata.obs` for batch information. Categories will automatically be
+                    converted into integer categories.
+            labels_key : str, optional
+                    Key in `adata.obs` for label information.
+            size_factor_key : str, optional
+                    Key in `adata.obs` for size factor information. If not provided,
+                    library size will be used.
+            categorical_covariate_keys : List[str], optional
+                    Keys in `adata.obs` corresponding to categorical data.
+            continuous_covariate_keys : List[str], optional
+                    Keys in `adata.obs` corresponding to continuous data.
+            **kwargs
+                    Additional keyword arguments for registration.
 
-        Returns
-        -------
-            If `copy` is True, return the modified `adata` set up for MetaVI
-            model, otherwise `adata` is modified in place.
+            Returns
+            -------
+            None
+                    The `adata` is modified in place to include the necessary fields
+                    for PertVIModel. An `AnnDataManager` is then registered to this class.
         """
         setup_method_args = cls._get_setup_method_args(**locals())
         anndata_fields = [
@@ -200,21 +237,28 @@ class PertVIModel(BaseModelClass, ArchesMixin):
         representation_kind: str = "all",
     ) -> np.ndarray:
         """
-        Return the latent representation for each cell.
+            Return the latent representation for each cell.
 
-        Args:
-        ----
-        adata: AnnData object with equivalent structure to initial AnnData. If `None`,
-            defaults to the AnnData object used to initialize the model.
-        indices: Indices of cells in adata to use. If `None`, all cells are used.
-        give_mean: Give mean of distribution or sample from it.
-        batch_size: Mini-batch size for data loading into model. Defaults to full batch training.
-        representation_kind: "intrinsic", "interaction" or "all" for the corresponding
-            representation kind.
+            Parameters
+            ----------
+            adata : AnnData, optional
+                    AnnData object with equivalent structure to initial AnnData. If `None`,
+                    uses the AnnData object used to initialize the model.
+            indices : Sequence[int], optional
+                    Indices of cells in adata to use. If `None`, use all cells.
+            give_mean : bool, default: True
+                    Whether to return the mean of the distribution or a sampled value.
+            batch_size : int, optional
+                    Mini-batch size for data loading. 
+            use_mask : bool, default: False
+                    If True, uses a masked inference input instead of the full inference input.
+            representation_kind : str, default: "all"
+                    Either "base", "pert", or "all". Controls how the latent embedding is computed.
 
-        Returns
-        -------
-            A numpy array with shape `(n_cells, n_latent)`.
+            Returns
+            -------
+            np.ndarray
+                    A Numpy array of shape (n_cells, n_latent) containing latent representations.
         """
         available_representation_kinds = ["base", "pert","all"]
         assert representation_kind in available_representation_kinds, (
@@ -260,6 +304,29 @@ class PertVIModel(BaseModelClass, ArchesMixin):
         ct_pert = None,
         ct_drug = None,
     ):
+        """
+            A simple function to create one-hot dataset label encoding and store in `adata.obsm['pert']`. 
+
+            Parameters
+            ----------
+            adata : AnnData
+                    The AnnData object.
+            pert_label : str, optional
+                    Key in `adata.obs` corresponding to drug / data identity.
+            drug_label : str, optional
+                    Key in `adata.obs` corresponding to drug / data identity.
+            dose_label : str, optional
+                    Key in `adata.obs` for the dosage levels.
+            ct_pert : str, optional
+                    Name or category representing control (unperturbed) in `pert_label` (Depracated).
+            ct_drug : str, optional
+                    Name or category representing control drug in `drug_label` (Depracated).
+
+            Returns
+            -------
+            None
+                    Modifies `adata.obsm['pert']` in place with the new encoding.
+        """
         if pert_label is None:
             df = pd.get_dummies(adata.obs[drug_label]) * 1
             if dose_label is not None:
@@ -267,14 +334,7 @@ class PertVIModel(BaseModelClass, ArchesMixin):
             #df.iloc[adata.obs[drug_label]==ct_drug] = 0
         elif drug_label is None:
             df = pd.get_dummies(adata.obs[pert_label]) * 1
-            #df.iloc[adata.obs[pert_label]==ct_pert] = 0
-        else:
-            adata.obs['pert_drug'] = adata.obs[pert_label].astype(str) + adata.obs[drug_label].astype(str)
-            df = pd.get_dummies(adata.obs['pert_drug']) * 1
-            if dose_label is not None:
-                df = df * adata.obs[dose_label][:,None]
-            #df.iloc[adata.obs[drug_label]==ct_drug] = 0
-            #df.iloc[adata.obs[pert_label]==ct_pert] = 0        
+            #df.iloc[adata.obs[pert_label]==ct_pert] = 0  
         adata.obsm['pert'] = df.values
         return
 
@@ -295,31 +355,47 @@ class PertVIModel(BaseModelClass, ArchesMixin):
         **trainer_kwargs,
     ) -> None:
         """
-        Train the scShift model using a semisupervised data splitter. 
+            Train the scShift model using a semi-supervised data splitter.
 
-        Args:
-        ----
-        
-            max_epochs: Number of passes through the dataset. If `None`, default to
-                `np.min([round((20000 / n_cells) * 400), 400])`.
-            use_gpu: Use default GPU if available (if `None` or `True`), or index of
-                GPU to use (if `int`), or name of GPU (if `str`, e.g., `"cuda:0"`),
-                or use CPU (if `False`).
-            train_size: Size of training set in the range [0.0, 1.0].
-            validation_size: Size of the validation set. If `None`, default to
-                `1 - train_size`. If `train_size + validation_size < 1`, the remaining
-                cells belong to the test set.
-            batch_size: Mini-batch size to use during training.
-            early_stopping: Perform early stopping. Additional arguments can be passed
-                in `**kwargs`. See :class:`~scvi.train.Trainer` for further options.
-            plan_kwargs: Keyword args for :class:`~scvi.train.TrainingPlan`. Keyword
-                arguments passed to `train()` will overwrite values present
-                in `plan_kwargs`, when appropriate.
-            **trainer_kwargs: Other keyword args for :class:`~scvi.train.Trainer`.
+            This method sets up a training loop with the chosen data splitter and
+            training plan. It can optionally perform early stopping if desired.
 
-        Returns
-        -------
-            None. The model is trained.
+            Parameters
+            ----------
+            max_epochs : int, optional
+                    Number of passes through the dataset. Defaults to a heuristic based on
+                    the number of cells if not specified.
+            use_gpu : Union[str, int, bool], optional
+                    Whether to use GPU for training. Can be None, True/False, or a specific
+                    GPU index or name, e.g. "cuda:0".
+            batch_size : int, default: 128
+                    Mini-batch size for data loading during training.
+            early_stopping : bool, default: False
+                    If True, perform early stopping based on validation loss.
+            train_size : float, default: 0.9
+                    Proportion of cells to include in the training set.
+            validation_size : float, optional
+                    Proportion of cells to include in the validation set. If None, uses
+                    1 - train_size. Additional cells, if any, form a test set.
+            n_samples_per_label : int, default: 100
+                    Number of labeled samples to use per label category in semi-supervised mode.
+            lr : float, default: 1e-3
+                    Learning rate for the optimizer.
+            weight_decay : float, default: 1e-4
+                    Weight decay for the optimizer, acting as an L2 regularization.
+            n_epochs_kl_warmup : int, optional
+                    Number of epochs over which to scale up the KL term from 0 to 1.
+            n_steps_kl_warmup : int, default: 1600
+                    Number of training steps over which to warm up the KL divergence term.
+            **trainer_kwargs
+                    Additional keyword arguments passed to the :class:`~scvi.train.Trainer`
+                    or :class:`~scvi.train.SemiSupervisedTrainingPlan`.
+
+            Returns
+            -------
+            None
+                    The model is trained in place. Check logs for training progress or
+                    potential early stopping triggers.
         """
         data_splitter = SemiSupervisedDataSplitter(
             self.adata_manager,
