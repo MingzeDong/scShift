@@ -1,3 +1,6 @@
+[![PyPI package](https://img.shields.io/pypi/v/scshift?label=pypi%20package)](https://pypi.org/project/scshift/)
+[![Read the Docs](https://img.shields.io/readthedocs/idsc-suite/latest.svg?label=Read%20the%20Docs)](https://idsc-suite.readthedocs.io/)
+
 # scShift
 
 How to identify true biological differences across samples while overcoming batch effects has been a persistent challenge in single-cell RNA-seq data analysis. We found that scaling up deep identifiable models leads to a surprisingly effective solution for this challenging task. We developed scShift, a deep variational inference framework with theoretical support for disentangling batch-dependent and batch-independent variations. Through training the model with compendiums of scRNA-seq atlases, scShift shows remarkable zero-shot capabilities in revealing representations of cell types and biological states in single-cell data while overcoming batch effects. scShift incorporates four important ingredients for next-generation single-cell computation models: 1) zero-shot, 2) disentanglement, 3) scaling performance, and 4) no need for external annotation (unbiased). Please refer to our manuscript for more details.
@@ -13,6 +16,13 @@ The scShift (pertvi) package is supported for all OS in principle. The package h
 * Linux: Ubantu (20.04.5)
 ### Dependencies
 See `setup.cfg` for details.
+
+## Installation
+scShift requires `python` version 3.7+.  Install directly from pip with:
+
+    pip install scshift
+
+The installation should take no more than a few minutes on a normal desktop computer.
 
 ## Usage
 Please refer to the documentation and tutorial [here](https://idsc-suite.readthedocs.io/en/latest). Download the data / model used for tutorial [here](https://drive.google.com/drive/folders/1YXfoPAav-IGRbXjBfUT-ak8u3R5VUVCe?usp=share_link).
